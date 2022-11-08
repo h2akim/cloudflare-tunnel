@@ -1,0 +1,236 @@
+# Quick command line for CloudFlare Tunnel
+# Created by Hakim Razalan
+# Use at your own risk
+
+cft() {
+  if [ -z "$1" ]
+    then
+      echo "🙊  No command supplied"
+      return 1
+  fi
+
+  # Check if cloudflared is installed
+  if ! command -v cloudflared &> /dev/null
+    then
+      echo "\n🙊 $fg_bold[red]cloudflared$reset_color could not be found."
+      echo "🚜 Please install through -> $fg_bold[green]brew install cloudflare/cloudflare/cloudflared$reset_color"
+      return 1
+  fi
+
+  # Check if user already login to cloudflare tunnel
+  cert=~/.cloudflared/cert.pem
+  if [ ! -f "$cert" ]
+    then
+      echo "\n🙊 $fg_bold[red]Credentials$reset_color could not be found."
+      echo "🚜 You might need to run -> $fg_bold[green]cloudflared tunnel login$reset_color first before begin"
+      return 1
+  fi
+
+  case $1 in
+  create)
+    __create_cloud_flare_tunnel $2
+    ;;
+  set-domain)
+    __set_domain $2
+    ;;
+  unset-domain)
+    __unset_domain
+    ;;
+  flush)
+    __flush
+    ;;
+  esac
+
+  return 0
+}
+
+__create_cloud_flare_tunnel() {
+  if [ -z "$1" ]
+    then
+      echo "🙊  No tunnel name supplied"
+      return 1
+  fi
+
+  domain_file=~/.cloudflared/domain.json
+  domain="yourdomain.com"
+  no_domain=0
+  if [ -f "$domain_file" ]
+    then
+      current_domain=$(<$domain_file)
+      domain=${current_domain##*DOMAIN=}
+    else
+      no_domain=1
+  fi
+
+  tunnel_name=$1
+  echo "🔨 Creating CloudFlare Tunnel -> $tunnel_name\n"
+
+  read -r "set_domain?🌍 Domain (eg. $domain) -> "
+  if [ $no_domain -eq 1 ]
+    then
+      if [ ! -z "$set_domain" ]
+        then
+          echo "⛔️ No domain provided. Abort"
+          return 1
+      fi
+      domain=$set_domain
+      echo "ℹ️ Alternatively you can set default domain through - $fg_bold[green]cft set-domain yourdomain.com$reset_color"
+    else
+      if [ ! -z "$set_domain" ]
+        then
+          domain=$set_domain
+      fi
+  fi
+
+  # User has to provide subdomain if not it will use tunnel name
+  read -r "subdomain?🌍 Subdomain ($tunnel_name) -> "
+
+  # Where tunnel resolve to
+  read -r "point_to?🔗 Resolve to url (with http/https) -> "
+  if [ -z "$point_to" ]
+    then
+      echo "😡 Resolve to url cannot be empty!"
+      return 1
+  fi
+
+  # Set subdomain is user provice subdomain
+  if [ -z "$subdomain" ]
+    then
+      echo "🔂 Using ${tunnel_name} as subdomain"
+      subdomain=$tunnel_name
+  fi
+
+  # Create tunnel
+  created_tunnel=$(cloudflared tunnel create $tunnel_name)
+  if [ $? -eq 1 ]
+    then
+      echo "🥵 Oops. Failed to create tunnel. Check failed message above."
+      return 1
+  fi
+
+  uuid=${created_tunnel##*Created tunnel $tunnel_name with id }
+
+  # Create DNS
+  created_dns=$(cloudflared tunnel route dns $tunnel_name $subdomain)
+  if [ $? -eq 1 ]
+    then
+      echo "🥵 Oops. Failed to create dns"
+      return 1
+  fi
+
+  # Create .cloudflared folder
+  if [ ! -d "./.cloudflared" ] 
+    then
+      mkdir .cloudflared
+  fi
+
+  # Copy credentials from ~/.cloudflared to ./.cloudflared
+  mv ~/.cloudflared/$uuid.json ./.cloudflared/credentials-$uuid.json
+
+  # Add configuration to config-<tunnel-name>.yml
+  __add_config $tunnel_name $uuid $subdomain $domain $point_to $ssl
+
+  if read -q "choice?🛑 Do you want to create executable file? $fg_bold[green](cft-share-$tunnel_name.sh)$reset_color [Y/n] ";
+    then
+      echo "\n📦  Creating executable file $fg_bold[green]cft-share-$tunnel_name.sh$reset_color"
+      __create_executable $tunnel_name $uuid
+      chmod +x cft-share-$tunnel_name.sh
+      echo "\n📦  To serve tunnel just run - $fg_bold[green]./cft-share-$tunnel_name.sh$reset_color"
+    else
+      echo "\n📦  You can serve tunnel by - $fg_bold[green]cloudflared tunnel --config ./.cloudflared/config-$uuid.yml run $tunnel_name$reset_color"
+  fi
+
+  echo "\n🚀  Finished!"
+}
+
+__add_config() {
+  tunnel_name=$1
+  uuid=$2
+  subdomain=$3
+  domain=$4
+  local=$5
+  localWithoutHttp=$(echo $5 | sed -E 's/^\s*.*:\/\///g')
+  ssl=$6
+
+  config_file=./.cloudflared/config-$uuid.yml
+
+  echo "tunnel: $uuid" >> $config_file
+  echo "credentials-file: .cloudflared/credentials-$uuid.json" >> $config_file
+  echo "noTLSVerify: true" >> $config_file
+  echo "ingress:" >> $config_file
+  echo "  - hostname: $subdomain.$domain" >> $config_file
+  echo "    service: $local" >> $config_file
+  echo "    originRequest:" >> $config_file
+  echo "      httpHostHeader: $localWithoutHttp" >> $config_file
+  echo "" >> $config_file
+  echo "  - service: http_status:404" >> $config_file
+}
+
+__create_executable() {
+  tunnel_name=$1
+  uuid=$2
+  echo "cloudflared tunnel --config ./.cloudflared/config-$uuid.yml run $tunnel_name" >> cft-share-$tunnel_name.sh
+}
+
+__set_domain() {
+  if [ -z "$1" ]
+    then
+      echo "🙊  No domain supplied"
+      return 1
+  fi
+
+  new_domain=$1
+  domain_file=~/.cloudflared/domain.json
+
+  if [ -f "$domain_file" ]
+    then
+      # If domain file exist indicate there are existing domain set. Prompt to replace or no
+      current_domain=$(<$domain_file)
+      domain=${current_domain##*DOMAIN=}
+
+      if read -q "choice?🛑 Do you want to replace current domain? $fg_bold[green]($domain)$reset_color [Y/n] ";
+        then
+          echo "\n📦  Replacing $domain with $fg_bold[green]$new_domain$reset_color"
+          rm -f $domain_file
+          echo "DOMAIN=$new_domain" >> $domain_file
+          echo "\n📦  Succesfully set domain to $fg_bold[green]$new_domain$reset_color"
+        else
+          echo "\n🐸 Okay! Domain replacement cancelled."
+      fi
+    else
+    echo "DOMAIN=$new_domain" >> $domain_file
+    echo "\n📦  Succesfully set domain to $fg_bold[green]$new_domain$reset_color"
+  fi
+}
+
+__unset_domain() {
+  domain_file=~/.cloudflared/domain.json
+
+  if [ -f "$domain_file" ]
+    then
+      # If domain file exist indicate there are existing domain set. Prompt to replace or no
+      current_domain=$(<$domain_file)
+      domain=${current_domain##*DOMAIN=}
+
+      if read -q "choice?🛑 Confirm to unset default domain? $fg_bold[green]($domain)$reset_color [Y/n] ";
+        then
+          echo "\n🪓  Unsetting default domain - $fg_bold[green]$domain$reset_color"
+          rm -f $domain_file
+          echo "\n🙀  Succesfully unset default domain."
+        else
+          echo "\n👍 Okay! Default domain unset cancelled."
+      fi
+    else
+    echo "\n👻 You don't have any default domain."
+  fi
+}
+
+__flush() {
+  if read -q "choice?🛑 Are you sure to flush CloudFlare Tunnel configurations? [Y/n] ";
+    then
+      echo "\n🚽  Flush CloudFlare Tunnel configuration on current project directory$reset_color"
+      rm -r cft-share-*
+      rm -r .cloudflared/*
+      echo "\n😌 Completed! You might need to manually delete your DNS record and Tunnel list on CloudFlare dashboard."
+  fi
+}
