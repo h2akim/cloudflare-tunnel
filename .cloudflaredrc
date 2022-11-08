@@ -1,6 +1,8 @@
+#!/bin/zsh
+
 # Quick command line for CloudFlare Tunnel
-# Created by Hakim Razalan
-# Use at your own risk
+# Created by Hakim Razalan (hakim.razalan@gmail.com)
+# Tested on zsh. Use at your own risk
 
 cft() {
   if [ -z "$1" ]
